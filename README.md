@@ -1,7 +1,7 @@
-🔧 T-SQL scripts:  
-Include performance tuning, monitoring, automation, and daily SQL Server.  
-T-SQL read/write Excel/csv/json  
-T-SQL solution copies multiple tables using a metadata-driven approach.  
+🔧 SQL scripts:  
+Performance tuning, monitoring, automation, and daily SQL Server.  
+Read/write Excel/csv/json  
+ETL solution copy tables with metadata control table.  
 
 🚀 How to Use:  
 Feel free to clone the repository or copy individual scripts.  
