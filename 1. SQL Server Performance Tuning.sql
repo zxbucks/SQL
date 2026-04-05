@@ -6,10 +6,16 @@ EXEC sp_BlitzFirst @seconds= 60, @ExpertMode=1;
 --     1. Total database size (and quanlity)
 --     2. Batch Requests per Sec
 --     3. Wait Time Ratio: Wait Time per Core per Sec
---  PAGEIOLATCH_EX:       EXEC sp_BlitzIndex @GetAllDatabases = 1;
---                        EXEC sp_BlitzCache @SortOrder = 'read'
---  SOS_SCHEDULER_YIELD   EXEC sp_BlitzCache @SortOrder = 'cpu'
---                        EXEC sp_BlitzCache @SortOrder = 'cpu', @StoredProcName='usp_Report2'
---  LCK:                  Index tuning: torward the 5 & 5
---                        Query tuning: (Long running low CPU): EXEC sp_BlitzCache @SortOrder = 'duration';
---                        Magic button: Change Isolation Levels(RCSI/SI)
+--  PAGEIOLATCH_EX:            EXEC sp_BlitzIndex @GetAllDatabases = 1;
+--                             EXEC sp_BlitzCache @SortOrder = 'read';
+--  SOS_SCHEDULER_YIELD        EXEC sp_BlitzCache @SortOrder = 'cpu';
+--                             EXEC sp_BlitzCache @SortOrder = 'cpu', @StoredProcName='usp_Report2';
+--  LCK:                       Index tuning: torward the 5 & 5
+--                             Query tuning: (Long running low CPU): EXEC sp_BlitzCache @SortOrder = 'duration';
+--                             Magic button: Change Isolation Levels(RCSI/SI)
+--  THREADPOOL                 (Find the lead blocker, and open transctions)
+--  RESOURCES_SEMAPHORE        EXEC sp_BlitzCache @SortOrder = 'memory grant';
+--                             EXEC sp_BlitzCache @SortOrder = 'unused grant';
+--  Hardware-Sounding Waits    WRITELOG, HADR_SYNC_COMMIT, ASYNC_NETWORK_IO
+
+EXEC sp_BlitzWho @ExpertMode=1;
