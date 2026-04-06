@@ -1,4 +1,4 @@
-EXEC sp_Blitz @CheckServerInfo=1, @CheckUserDatabaseObjects=0;
+EXEC sp_Blitz @CheckServerInfo=1;
 EXEC sp_BlitzFirst @SinceStartup=1, @OutputType='Top10';
 
 EXEC sp_BlitzFirst @seconds= 60, @ExpertMode=1;
