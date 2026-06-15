@@ -1,24 +1,67 @@
+--Brent Ozar's SQL Server Performance Tuning Script
 EXEC sp_Blitz @CheckServerInfo=1;
-EXEC sp_BlitzFirst @SinceStartup=1, @OutputType='Top10';
+EXEC sp_BlitzFirst @SinceStartup=1;
 
-EXEC sp_BlitzFirst @seconds= 60, @ExpertMode=1;
---  Tuning: Check top wait stat and focus on 3 numbers.
---     1. Total database size (and quanlity)
---     2. Batch Requests per Sec
---     3. Wait Time Ratio: Wait Time per Core per Sec
---  Check wait stats: . PAGEIOLATCH, SOS_SCHED: add missing
---                    . LCK%: dedupe, eleminate, then add
---  Use the @AI = 2 parameter to edit the prompt
---  PAGEIOLATCH_EX:            EXEC sp_BlitzIndex @GetAllDatabases = 1;
---                             EXEC sp_BlitzCache @SortOrder = 'read';
---  SOS_SCHEDULER_YIELD        EXEC sp_BlitzCache @SortOrder = 'cpu';
---                             EXEC sp_BlitzCache @SortOrder = 'cpu', @StoredProcName='usp_Report2';
---  LCK:                       Index tuning: torward the 5 & 5
---                             Query tuning: (Long running low CPU): EXEC sp_BlitzCache @SortOrder = 'duration';
---                             Magic button: Change Isolation Levels(RCSI/SI)
+--EXEC sp_BlitzFirst @SinceStartup=1, @OutputType='Top10';
+--EXEC sp_BlitzFirst @seconds= 60, @ExpertMode=1;
+--EXEC sp_BlitzIndex @GetAllDatabases = 1;
+--EXEC sp_BlitzCache @SortOrder = 'read';
+--EXEC sp_BlitzCache @SortOrder = 'cpu';
+
+--EXEC sp_BlitzFirst @seconds= 60, @ExpertMode=1;
+--sp_BlitzFirst Tuning: Check top wait stats (sys.dm_os_wait_stats) and focus on 3 numbers.
+-----1. Total database size (and quanlity)
+-----2. Batch Requests per Sec
+-----3. Wait Time Ratio: Wait Time per Core per Sec
+
+--Popular Wait Types:
+----------------------------------------------------------------------------------------------------
+--PAGEIOLATCH_EX:       Waiting to read uncached data from data files, 
+--                      We're looking for queries that read the most data
+--                      . Non-sargable WHERE clauses
+--                      . Implict conversions
+--                      . Need index tuning (Focus on adding missing indexes)
+--                      . Focus: Add missing indexes, tune logical reads 
+--                      . Reporting on large ranges of data
+--                      EXEC sp_BlitzIndex @GetAllDatabases = 1;
+--                      EXEC sp_BlitzCache @SortOrder = 'read';
+----------------------------------------------------------------------------------------------------
+--SOS_SCHEDULER_YIELD   Waiting on CPU time
+--                      We're looking for queries that use the most CPU
+--						. Running row-by-row instead of set-based
+--						. Using CPU-intensive calculations
+--						. Repeatedly joning, grouping, sorting
+--                      . Focus: Add missing indexes, tune logical reads 
+--                      EXEC sp_BlitzCache @SortOrder = 'cpu';
+--                      EXEC sp_BlitzCache @SortOrder = 'cpu', @StoredProcName='usp_Report2';
+----------------------------------------------------------------------------------------------------
+--LCK:       Index tuning: torward the 5 & 5 
+--           Index tuning: Dedupe & eleminate first, then add missing indexes)
+--           Query tuning: (Long running low CPU): EXEC sp_BlitzCache @SortOrder = 'duration';
+--           Magic button: Change Isolation Levels(RCSI/SI)
+----------------------------------------------------------------------------------------------------
+--LATCH_EX   Can show up in combination with:
+--           . CX% waits
+--           . Servers with enough memory to cache frequently-queried tables (like config tables)
+--           . Queries running very frequently, whose results should probally be cached
+--           . EXEC sp_BlitzCache @SortOrder = 'executions';
+----------------------------------------------------------------------------------------------------
 --  THREADPOOL                 (Find the lead blocker, and open transctions)
 --  RESOURCES_SEMAPHORE        EXEC sp_BlitzCache @SortOrder = 'memory grant';
 --                             EXEC sp_BlitzCache @SortOrder = 'unused grant';
 --  Hardware-Sounding Waits    WRITELOG, HADR_SYNC_COMMIT, ASYNC_NETWORK_IO
-
-EXEC sp_WhoIsActive @get_locks = 1, @get_plans = 1;
+----------------------------------------------------------------------------------------------------
+-- Where query tuning helps less:
+-- WRITELOG, HADR_SYNC_COMMIT, ASYNC_NETWORK_IO, BACKUP%
+----------------------------------------------------------------------------------------------------
+-- (Has CPU overhead!!) Turn on last-actual-plans at the database level
+-- ALTER DATABASE SCOPED CONFIGURATION SET LAST_QUERY_PLAN_STATS = ON
+----------------------------------------------------------------------------------------------------
+-- Check SQL Server Sampled Statistics:
+-- CREATE INDEX Location ON dbo.Users(Location); -- Help SQL Server take closer statistics
+-- DBCC SHOW_STATISTICS('dbo.Users', 'Location');
+-- DROP INDEX Location ON dbo.Users;
+-- Ask SQL Server for a better  statistics: UPDATE STATISTICS dbo.Users WITH FULLSCAN
+----------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------
