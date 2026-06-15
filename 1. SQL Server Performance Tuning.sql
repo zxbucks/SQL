@@ -6,6 +6,9 @@ EXEC sp_BlitzFirst @seconds= 60, @ExpertMode=1;
 --     1. Total database size (and quanlity)
 --     2. Batch Requests per Sec
 --     3. Wait Time Ratio: Wait Time per Core per Sec
+--  Check wait stats: . PAGEIOLATCH, SOS_SCHED: add missing
+--                    . LCK%: dedupe, eleminate, then add
+--  Use the @AI = 2 parameter to edit the prompt
 --  PAGEIOLATCH_EX:            EXEC sp_BlitzIndex @GetAllDatabases = 1;
 --                             EXEC sp_BlitzCache @SortOrder = 'read';
 --  SOS_SCHEDULER_YIELD        EXEC sp_BlitzCache @SortOrder = 'cpu';
