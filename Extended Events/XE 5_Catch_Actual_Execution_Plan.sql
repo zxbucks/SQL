@@ -15,6 +15,9 @@ ADD EVENT sqlserver.query_post_execution_showplan
     ACTION
     (
         sqlserver.database_name,
+        sqlserver.client_app_name,
+        sqlserver.client_hostname,
+        sqlserver.username,
         sqlserver.session_id,
         sqlserver.sql_text
     )
