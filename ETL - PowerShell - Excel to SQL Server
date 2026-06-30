@@ -1,0 +1,428 @@
+<#
+.SYNOPSIS
+    Load one Excel worksheet into a SQL Server table.
+
+.DESCRIPTION
+    - Reads column names from the Excel header row.
+    - Creates or validates the target SQL table.
+    - Loads data with SqlBulkCopy.
+    - Cleans common Excel issues such as <Null>, tabs, CR/LF, and non-breaking spaces.
+
+.NOTES
+    Prerequisite:
+        Install-Module ImportExcel -Scope AllUsers
+
+    Security:
+        Use Windows Authentication by default.
+        Do not hard-code passwords in this file.
+#>
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+# ============================================================
+# User settings
+# ============================================================
+
+$Config = @{
+    # Source Excel file
+    Folder        = "C:\Path\To\Folder"
+    ExcelFileName = "SourceFile.xlsx"
+    WorksheetName = "Sheet1"
+    HeaderRow     = 1
+
+    # Target SQL table
+    SqlServerInstance = "SERVER\INSTANCE"
+    DatabaseName      = "DatabaseName"
+    SchemaName        = "dbo"
+    TableName         = "TargetTable"
+
+    # Table/load behavior
+    ColumnSqlType          = "NVARCHAR(255)"   # NVARCHAR(255), NVARCHAR(4000), or NVARCHAR(MAX)
+    DropAndRecreateTable   = $true             # Drops and recreates target table from Excel headers
+    TruncateBeforeLoad     = $false            # Only used when DropAndRecreateTable = $false
+    ExcelReadMode          = "Text"            # Text = displayed value; Raw = underlying value
+    SkipEmptyRows          = $true
+    TruncateLongValues     = $false
+    BatchSize              = 5000
+    BulkCopyTimeoutSeconds = 0                 # 0 = unlimited
+
+    # Optional SQL authentication. Leave both null for Windows Authentication.
+    SqlUser     = $null
+    SqlPassword = $null
+}
+
+$ExcelPath = Join-Path $Config.Folder $Config.ExcelFileName
+$LogPath   = Join-Path $Config.Folder ("LoadExcelToSql_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+
+# ============================================================
+# Helper functions
+# ============================================================
+
+function Write-Log {
+    param(
+        [Parameter(Mandatory)] [string]$Message,
+        [string]$Level = "INFO"
+    )
+
+    $Line = "[{0}] [{1}] {2}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Level, $Message
+    Write-Host $Line
+    Add-Content -Path $LogPath -Value $Line -Encoding UTF8
+}
+
+function Quote-SqlIdentifier {
+    param([Parameter(Mandatory)] [string]$Name)
+
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        throw "SQL identifier cannot be blank."
+    }
+
+    return "[{0}]" -f ($Name -replace "]", "]]")
+}
+
+function Quote-SqlString {
+    param([AllowNull()] [string]$Value)
+    return "N'{0}'" -f ($Value -replace "'", "''")
+}
+
+function New-SqlConnectionString {
+    $Builder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new()
+    $Builder["Data Source"] = $Config.SqlServerInstance
+    $Builder["Initial Catalog"] = $Config.DatabaseName
+    $Builder["Encrypt"] = $true
+    $Builder["TrustServerCertificate"] = $true
+
+    if ([string]::IsNullOrWhiteSpace($Config.SqlUser)) {
+        $Builder["Integrated Security"] = $true
+    }
+    else {
+        $Builder["User ID"] = $Config.SqlUser
+        $Builder["Password"] = $Config.SqlPassword
+    }
+
+    return $Builder.ConnectionString
+}
+
+function Invoke-SqlNonQuery {
+    param(
+        [Parameter(Mandatory)] [System.Data.SqlClient.SqlConnection]$Connection,
+        [Parameter(Mandatory)] [string]$Sql
+    )
+
+    $Command = $Connection.CreateCommand()
+    $Command.CommandText = $Sql
+    $Command.CommandTimeout = 0
+
+    try {
+        [void]$Command.ExecuteNonQuery()
+    }
+    finally {
+        $Command.Dispose()
+    }
+}
+
+function Clean-CellValue {
+    param([AllowNull()] [object]$Value)
+
+    if ($null -eq $Value) {
+        return ""
+    }
+
+    $Text = [string]$Value
+    $Text = [regex]::Replace($Text, "(?i)<null>", "")
+    $Text = $Text -replace "`t|`r|`n", ""
+    $Text = $Text -replace ([string][char]160), " "
+
+    return $Text.Trim()
+}
+
+function Get-ExcelCellText {
+    param(
+        [Parameter(Mandatory)] $Worksheet,
+        [Parameter(Mandatory)] [int]$Row,
+        [Parameter(Mandatory)] [int]$Column
+    )
+
+    $Cell = $Worksheet.Cells[$Row, $Column]
+
+    if ($null -eq $Cell) {
+        return ""
+    }
+
+    if ($Config.ExcelReadMode -eq "Raw") {
+        return Clean-CellValue $Cell.Value
+    }
+
+    if ($null -ne $Cell.Text -and $Cell.Text -ne "") {
+        return Clean-CellValue $Cell.Text
+    }
+
+    return Clean-CellValue $Cell.Value
+}
+
+function Get-SafeColumnNames {
+    param(
+        [Parameter(Mandatory)] $Worksheet,
+        [Parameter(Mandatory)] [int]$StartColumn,
+        [Parameter(Mandatory)] [int]$EndColumn
+    )
+
+    $Names = [System.Collections.Generic.List[string]]::new()
+    $Used  = @{}
+
+    for ($Column = $StartColumn; $Column -le $EndColumn; $Column++) {
+        $Name = Clean-CellValue $Worksheet.Cells[$Config.HeaderRow, $Column].Text
+        $Name = [regex]::Replace($Name, "[\x00-\x1F]", " ")
+
+        if ([string]::IsNullOrWhiteSpace($Name)) {
+            $Name = "Column_$Column"
+        }
+
+        if ($Name.Length -gt 128) {
+            $Name = $Name.Substring(0, 128)
+        }
+
+        $BaseName = $Name
+        $Counter  = 1
+
+        while ($Used.ContainsKey($Name.ToUpperInvariant())) {
+            $Counter++
+            $Suffix = "_$Counter"
+            $Name = $BaseName.Substring(0, [Math]::Min($BaseName.Length, 128 - $Suffix.Length)) + $Suffix
+        }
+
+        $Used[$Name.ToUpperInvariant()] = $true
+        $Names.Add($Name)
+    }
+
+    return $Names.ToArray()
+}
+
+function New-StringDataTable {
+    param([Parameter(Mandatory)] [string[]]$ColumnNames)
+
+    $Table = [System.Data.DataTable]::new()
+
+    foreach ($ColumnName in $ColumnNames) {
+        $Column = [System.Data.DataColumn]::new($ColumnName, [string])
+        $Column.AllowDBNull = $true
+        [void]$Table.Columns.Add($Column)
+    }
+
+    return ,$Table
+}
+
+function Test-Config {
+    if (-not (Test-Path $Config.Folder)) {
+        throw "Folder not found: $($Config.Folder)"
+    }
+
+    if (-not (Test-Path $ExcelPath)) {
+        throw "Excel file not found: $ExcelPath"
+    }
+
+    if ($Config.ExcelReadMode -notin @("Text", "Raw")) {
+        throw "ExcelReadMode must be Text or Raw."
+    }
+
+    if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
+        throw "Missing module ImportExcel. Run: Install-Module ImportExcel -Scope AllUsers"
+    }
+
+    $Type = ($Config.ColumnSqlType -replace "\s", "").ToUpperInvariant()
+
+    if ($Type -notmatch "^NVARCHAR\((MAX|[1-9][0-9]{0,3})\)$") {
+        throw "ColumnSqlType must be NVARCHAR(255), NVARCHAR(4000), or NVARCHAR(MAX)."
+    }
+
+    if ($Matches[1] -ne "MAX" -and [int]$Matches[1] -gt 4000) {
+        throw "NVARCHAR length cannot exceed 4000 unless using NVARCHAR(MAX)."
+    }
+
+    # Fail early if the workbook is locked.
+    $Stream = [System.IO.File]::Open($ExcelPath, "Open", "Read", "Read")
+    $Stream.Close()
+
+    return @{
+        ColumnSqlType = $Type
+        MaxChars      = if ($Matches[1] -eq "MAX") { $null } else { [int]$Matches[1] }
+    }
+}
+
+# ============================================================
+# Main process
+# ============================================================
+
+$Package  = $null
+$Conn     = $null
+$BulkCopy = $null
+
+try {
+    New-Item -Path $LogPath -ItemType File -Force | Out-Null
+    $ValidatedConfig = Test-Config
+
+    Import-Module ImportExcel -ErrorAction Stop
+
+    Write-Log "Script started."
+    Write-Log "Excel path: $ExcelPath"
+    Write-Log "Target: $($Config.SqlServerInstance).$($Config.DatabaseName).$($Config.SchemaName).$($Config.TableName)"
+
+    $Package   = Open-ExcelPackage -Path $ExcelPath
+    $Worksheet = $Package.Workbook.Worksheets[$Config.WorksheetName]
+
+    if ($null -eq $Worksheet) {
+        $Sheets = ($Package.Workbook.Worksheets | ForEach-Object Name) -join ", "
+        throw "Worksheet '$($Config.WorksheetName)' not found. Available sheets: $Sheets"
+    }
+
+    if ($null -eq $Worksheet.Dimension) {
+        throw "Worksheet '$($Config.WorksheetName)' is empty."
+    }
+
+    $StartColumn = $Worksheet.Dimension.Start.Column
+    $EndColumn   = $Worksheet.Dimension.End.Column
+    $EndRow      = $Worksheet.Dimension.End.Row
+
+    if ($Config.HeaderRow -ge $EndRow) {
+        throw "No data rows found below header row $($Config.HeaderRow)."
+    }
+
+    $ColumnNames = Get-SafeColumnNames -Worksheet $Worksheet -StartColumn $StartColumn -EndColumn $EndColumn
+
+    Write-Log "Detected columns: $($ColumnNames.Count)"
+    Write-Log "Detected data rows: $($EndRow - $Config.HeaderRow)"
+
+    $QuotedSchema = Quote-SqlIdentifier $Config.SchemaName
+    $QuotedTable  = Quote-SqlIdentifier $Config.TableName
+    $FullTableName = "$QuotedSchema.$QuotedTable"
+
+    $Conn = [System.Data.SqlClient.SqlConnection]::new((New-SqlConnectionString))
+    $Conn.Open()
+
+    if ($Config.DropAndRecreateTable) {
+        Write-Log "Dropping and recreating target table."
+
+        $ColumnDefinitions = foreach ($ColumnName in $ColumnNames) {
+            "{0} {1} NULL" -f (Quote-SqlIdentifier $ColumnName), $ValidatedConfig.ColumnSqlType
+        }
+
+        $CreateSchemaCommand = "CREATE SCHEMA $QuotedSchema"
+
+        $CreateTableSql = @"
+IF SCHEMA_ID($(Quote-SqlString $Config.SchemaName)) IS NULL
+BEGIN
+    EXEC($(Quote-SqlString $CreateSchemaCommand));
+END;
+
+IF OBJECT_ID($(Quote-SqlString "$($Config.SchemaName).$($Config.TableName)"), N'U') IS NOT NULL
+BEGIN
+    DROP TABLE $FullTableName;
+END;
+
+CREATE TABLE $FullTableName
+(
+    $($ColumnDefinitions -join ",`n    ")
+);
+"@
+
+        Invoke-SqlNonQuery -Connection $Conn -Sql $CreateTableSql
+    }
+    else {
+        $CheckTableSql = @"
+IF OBJECT_ID($(Quote-SqlString "$($Config.SchemaName).$($Config.TableName)"), N'U') IS NULL
+BEGIN
+    THROW 51000, 'Target table does not exist.', 1;
+END;
+"@
+
+        Invoke-SqlNonQuery -Connection $Conn -Sql $CheckTableSql
+
+        if ($Config.TruncateBeforeLoad) {
+            Write-Log "Truncating target table."
+            Invoke-SqlNonQuery -Connection $Conn -Sql "TRUNCATE TABLE $FullTableName;"
+        }
+    }
+
+    $BulkCopy = [System.Data.SqlClient.SqlBulkCopy]::new(
+        $Conn,
+        [System.Data.SqlClient.SqlBulkCopyOptions]::TableLock,
+        $null
+    )
+
+    $BulkCopy.DestinationTableName = $FullTableName
+    $BulkCopy.BatchSize           = $Config.BatchSize
+    $BulkCopy.BulkCopyTimeout     = $Config.BulkCopyTimeoutSeconds
+
+    foreach ($ColumnName in $ColumnNames) {
+        [void]$BulkCopy.ColumnMappings.Add($ColumnName, $ColumnName)
+    }
+
+    $DataTable   = New-StringDataTable -ColumnNames $ColumnNames
+    $LoadedRows  = 0
+    $SkippedRows = 0
+
+    Write-Log "Loading rows."
+
+    for ($Row = $Config.HeaderRow + 1; $Row -le $EndRow; $Row++) {
+        $DataRow  = $DataTable.NewRow()
+        $AllEmpty = $true
+
+        for ($Column = $StartColumn; $Column -le $EndColumn; $Column++) {
+            $ColumnIndex = $Column - $StartColumn
+            $ColumnName  = $ColumnNames[$ColumnIndex]
+            $Value       = Get-ExcelCellText -Worksheet $Worksheet -Row $Row -Column $Column
+
+            if ($null -ne $ValidatedConfig.MaxChars -and $Value.Length -gt $ValidatedConfig.MaxChars) {
+                if ($Config.TruncateLongValues) {
+                    $Value = $Value.Substring(0, $ValidatedConfig.MaxChars)
+                }
+                else {
+                    throw "Value too long at Excel row $Row, column '$ColumnName'. Length: $($Value.Length), limit: $($ValidatedConfig.MaxChars)."
+                }
+            }
+
+            if ([string]::IsNullOrEmpty($Value)) {
+                $DataRow[$ColumnName] = [DBNull]::Value
+            }
+            else {
+                $DataRow[$ColumnName] = $Value
+                $AllEmpty = $false
+            }
+        }
+
+        if ($Config.SkipEmptyRows -and $AllEmpty) {
+            $SkippedRows++
+            continue
+        }
+
+        [void]$DataTable.Rows.Add($DataRow)
+
+        if ($DataTable.Rows.Count -ge $Config.BatchSize) {
+            $BulkCopy.WriteToServer($DataTable)
+            $LoadedRows += $DataTable.Rows.Count
+            Write-Log "Loaded rows: $LoadedRows"
+            $DataTable.Clear()
+        }
+    }
+
+    if ($DataTable.Rows.Count -gt 0) {
+        $BulkCopy.WriteToServer($DataTable)
+        $LoadedRows += $DataTable.Rows.Count
+        $DataTable.Clear()
+    }
+
+    Write-Log "Done. Loaded rows: $LoadedRows. Skipped empty rows: $SkippedRows."
+}
+catch {
+    Write-Log "FAILED: $($_.Exception.Message)" "ERROR"
+    Write-Log "Line: $($_.InvocationInfo.ScriptLineNumber)" "ERROR"
+    Write-Log "Text: $($_.InvocationInfo.Line)" "ERROR"
+    throw
+}
+finally {
+    if ($BulkCopy) { $BulkCopy.Close() }
+    if ($Conn)     { $Conn.Close(); $Conn.Dispose() }
+    if ($Package)  { $Package.Dispose() }
+
+    Write-Log "Script finished."
+}
