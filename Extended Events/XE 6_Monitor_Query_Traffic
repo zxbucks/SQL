@@ -1,0 +1,126 @@
+DROP EVENT SESSION [XE_Capture_Query_Text] ON SERVER 
+GO
+
+
+DECLARE
+    @DatabaseName sysname        = N'DATABSE_NAME_XXXX',
+    --@SearchText   nvarchar(4000) = N'%SEARCH_TEXT%', 
+    @SearchText   nvarchar(4000) = NULL,                    -- set NULL to disable
+    --@UserName     nvarchar(256)  = N'USER_NAME',                    
+    @UserName     nvarchar(256)  = NULL,                    -- set NULL to disable
+
+    @FileName     nvarchar(260);
+    SET @FileName =
+    N'C:\Temp\XE_Capture_Query_Text_'
+    + CONVERT(char(8), GETDATE(), 112)
+    + REPLACE(CONVERT(char(5), GETDATE(), 108), ':', '')
+    + N'.xel';
+
+
+
+DECLARE
+    @DbCondition nvarchar(max),
+    @StatementSearchCondition nvarchar(max) = N'',
+    @BatchSearchCondition nvarchar(max) = N'',
+    @UserCondition nvarchar(max) = N'',
+    @Sql nvarchar(max);
+
+SET @DbCondition =
+    N'[sqlserver].[equal_i_sql_unicode_string]([sqlserver].[database_name],N''' 
+    + REPLACE(@DatabaseName, '''', '''''') + N''')';
+
+IF @SearchText IS NOT NULL
+BEGIN
+    SET @StatementSearchCondition =
+        N' AND [sqlserver].[like_i_sql_unicode_string]([statement],N''' 
+        + REPLACE(@SearchText, '''', '''''') + N''')';
+
+    SET @BatchSearchCondition =
+        N' AND [sqlserver].[like_i_sql_unicode_string]([batch_text],N''' 
+        + REPLACE(@SearchText, '''', '''''') + N''')';
+END;
+
+IF @UserName IS NOT NULL
+BEGIN
+    SET @UserCondition =
+        N' AND [sqlserver].[equal_i_sql_unicode_string]([sqlserver].[username],N''' 
+        + REPLACE(@UserName, '''', '''''') + N''')';
+END;
+
+SET @Sql = N'
+CREATE EVENT SESSION [XE_Capture_Query_Text] ON SERVER
+ADD EVENT sqlserver.rpc_completed
+(
+    ACTION
+    (
+        sqlserver.client_app_name,
+        sqlserver.client_hostname,
+        sqlserver.database_name,
+        sqlserver.session_id,
+        sqlserver.sql_text,
+        sqlserver.username
+    )
+    WHERE (' + @DbCondition + @StatementSearchCondition + @UserCondition + N')
+),
+ADD EVENT sqlserver.sp_statement_completed
+(
+    ACTION
+    (
+        sqlserver.client_app_name,
+        sqlserver.client_hostname,
+        sqlserver.database_name,
+        sqlserver.session_id,
+        sqlserver.sql_text,
+        sqlserver.username
+    )
+    WHERE (' + @DbCondition + @StatementSearchCondition + @UserCondition + N')
+),
+ADD EVENT sqlserver.sql_batch_completed
+(
+    ACTION
+    (
+        sqlserver.client_app_name,
+        sqlserver.client_hostname,
+        sqlserver.database_name,
+        sqlserver.session_id,
+        sqlserver.sql_text,
+        sqlserver.username
+    )
+    WHERE (' + @DbCondition + @BatchSearchCondition + @UserCondition + N')
+),
+ADD EVENT sqlserver.sql_statement_completed
+(
+    ACTION
+    (
+        sqlserver.client_app_name,
+        sqlserver.client_hostname,
+        sqlserver.database_name,
+        sqlserver.session_id,
+        sqlserver.sql_text,
+        sqlserver.username
+    )
+    WHERE (' + @DbCondition + @StatementSearchCondition + @UserCondition + N')
+)
+ADD TARGET package0.event_file
+(
+    SET filename = N''' + REPLACE(@FileName, '''', '''''') + N''',
+        max_file_size = 100,
+        max_rollover_files = 5
+)
+WITH
+(
+    MAX_MEMORY = 4096 KB,
+    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
+    MAX_DISPATCH_LATENCY = 5 SECONDS,
+    MAX_EVENT_SIZE = 0 KB,
+    MEMORY_PARTITION_MODE = NONE,
+    TRACK_CAUSALITY = ON,
+    STARTUP_STATE = OFF
+);';
+
+PRINT @Sql;
+EXEC sys.sp_executesql @Sql;
+GO
+
+ALTER EVENT SESSION [XE_Capture_Query_Text] ON SERVER STATE = START;
+GO
