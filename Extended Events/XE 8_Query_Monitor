@@ -1,21 +1,3 @@
-DECLARE @Databases nvarchar(max) =
-N'''Database_A'',  ''Database_B''';
-
-DECLARE @ExcludedUsers nvarchar(max) =
-N'''Person_A'', ''Person_T''';
-
-DECLARE @sql nvarchar(max);
-
-SET @sql = N'
-
-IF EXISTS
-(
-    SELECT 1
-    FROM sys.server_event_sessions
-    WHERE name = N''DB_QueryTroubleshooting''
-)
-    DROP EVENT SESSION [DB_QueryTroubleshooting] ON SERVER;
-
 CREATE EVENT SESSION [DB_QueryTroubleshooting]
 ON SERVER
 
@@ -33,8 +15,9 @@ ADD EVENT sqlserver.attention
     )
     WHERE
     (
-        sqlserver.database_name IN (' + @Databases + N')
-        AND sqlserver.username NOT IN (' + @ExcludedUsers + N')
+        sqlserver.database_name = N'SampleDB'
+        AND sqlserver.username <> N'DOMAIN\AdminUser'
+        AND sqlserver.username <> N'DOMAIN\ServiceAccount'
     )
 ),
 
@@ -52,8 +35,9 @@ ADD EVENT sqlserver.rpc_completed
     )
     WHERE
     (
-        sqlserver.database_name IN (' + @Databases + N')
-        AND sqlserver.username NOT IN (' + @ExcludedUsers + N')
+        sqlserver.database_name = N'SampleDB'
+        AND sqlserver.username <> N'DOMAIN\AdminUser'
+        AND sqlserver.username <> N'DOMAIN\ServiceAccount'
     )
 ),
 
@@ -71,8 +55,9 @@ ADD EVENT sqlserver.sql_batch_completed
     )
     WHERE
     (
-        sqlserver.database_name IN (' + @Databases + N')
-        AND sqlserver.username NOT IN (' + @ExcludedUsers + N')
+        sqlserver.database_name = N'SampleDB'
+        AND sqlserver.username <> N'DOMAIN\AdminUser'
+        AND sqlserver.username <> N'DOMAIN\ServiceAccount'
     )
 ),
 
@@ -90,16 +75,17 @@ ADD EVENT sqlserver.query_post_execution_showplan
     )
     WHERE
     (
-        sqlserver.database_name IN (' + @Databases + N')
-        AND sqlserver.username NOT IN (' + @ExcludedUsers + N')
-        AND duration >= 1000000
+        sqlserver.database_name = N'SampleDB'
+        AND sqlserver.username <> N'DOMAIN\AdminUser'
+        AND sqlserver.username <> N'DOMAIN\ServiceAccount'
+        AND duration >= 1000000 -- 1 second
     )
 )
 
 ADD TARGET package0.event_file
 (
     SET
-        filename = N''C:\Temp\DB_QueryTroubleshooting.xel'',
+        filename = N'C:\Temp\DB_QueryTroubleshooting.xel',
         max_file_size = 500,
         max_rollover_files = 10
 )
@@ -112,8 +98,4 @@ WITH
     TRACK_CAUSALITY = ON,
     STARTUP_STATE = OFF
 );
-';
-
-PRINT @sql;
--- EXEC(@sql);
 GO
