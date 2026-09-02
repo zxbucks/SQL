@@ -1,0 +1,119 @@
+DECLARE @Databases nvarchar(max) =
+N'''Database_A'',  ''Database_B''';
+
+DECLARE @ExcludedUsers nvarchar(max) =
+N'''Person_A'', ''Person_T''';
+
+DECLARE @sql nvarchar(max);
+
+SET @sql = N'
+
+IF EXISTS
+(
+    SELECT 1
+    FROM sys.server_event_sessions
+    WHERE name = N''DB_QueryTroubleshooting''
+)
+    DROP EVENT SESSION [DB_QueryTroubleshooting] ON SERVER;
+
+CREATE EVENT SESSION [DB_QueryTroubleshooting]
+ON SERVER
+
+ADD EVENT sqlserver.attention
+(
+    ACTION
+    (
+        package0.event_sequence,
+        sqlserver.session_id,
+        sqlserver.client_app_name,
+        sqlserver.client_hostname,
+        sqlserver.database_name,
+        sqlserver.sql_text,
+        sqlserver.username
+    )
+    WHERE
+    (
+        sqlserver.database_name IN (' + @Databases + N')
+        AND sqlserver.username NOT IN (' + @ExcludedUsers + N')
+    )
+),
+
+ADD EVENT sqlserver.rpc_completed
+(
+    ACTION
+    (
+        package0.event_sequence,
+        sqlserver.session_id,
+        sqlserver.client_app_name,
+        sqlserver.client_hostname,
+        sqlserver.database_name,
+        sqlserver.sql_text,
+        sqlserver.username
+    )
+    WHERE
+    (
+        sqlserver.database_name IN (' + @Databases + N')
+        AND sqlserver.username NOT IN (' + @ExcludedUsers + N')
+    )
+),
+
+ADD EVENT sqlserver.sql_batch_completed
+(
+    ACTION
+    (
+        package0.event_sequence,
+        sqlserver.session_id,
+        sqlserver.client_app_name,
+        sqlserver.client_hostname,
+        sqlserver.database_name,
+        sqlserver.sql_text,
+        sqlserver.username
+    )
+    WHERE
+    (
+        sqlserver.database_name IN (' + @Databases + N')
+        AND sqlserver.username NOT IN (' + @ExcludedUsers + N')
+    )
+),
+
+ADD EVENT sqlserver.query_post_execution_showplan
+(
+    ACTION
+    (
+        package0.event_sequence,
+        sqlserver.session_id,
+        sqlserver.client_app_name,
+        sqlserver.client_hostname,
+        sqlserver.database_name,
+        sqlserver.sql_text,
+        sqlserver.username
+    )
+    WHERE
+    (
+        sqlserver.database_name IN (' + @Databases + N')
+        AND sqlserver.username NOT IN (' + @ExcludedUsers + N')
+        AND duration >= 1000000
+    )
+)
+
+ADD TARGET package0.event_file
+(
+    SET
+        filename = N''C:\Temp\DB_QueryTroubleshooting.xel'',
+        max_file_size = 500,
+        max_rollover_files = 10
+)
+
+WITH
+(
+    MAX_MEMORY = 16384 KB,
+    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
+    MAX_DISPATCH_LATENCY = 5 SECONDS,
+    TRACK_CAUSALITY = ON,
+    STARTUP_STATE = OFF
+);
+';
+
+PRINT @sql;
+-- EXEC(@sql);
+GO
